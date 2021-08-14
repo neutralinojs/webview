@@ -137,6 +137,9 @@ WEBVIEW_API void webview_return(webview_t w, const char *seq, int status,
 
 namespace webview {
 using dispatch_fn_t = std::function<void()>;
+using onCloseHandler_t = std::function<void()>;
+
+static onCloseHandler_t onCloseHandler;
 
 // Convert ASCII hex digit to a nibble (four bits, 0 - 15).
 //
@@ -457,6 +460,13 @@ public:
                        std::exit(0);
                      }),
                      this);
+    g_signal_connect(G_OBJECT(m_window), "delete-event",
+                     G_CALLBACK(+[](GtkWidget *, gpointer arg) {
+                       if(onCloseHandler)
+                         onCloseHandler();
+                       return true;
+                     }),
+                     nullptr);
     // Initialize webview widget
     m_webview = webkit_web_view_new();
     WebKitUserContentManager *manager =
@@ -624,7 +634,7 @@ public:
         objc_allocateClassPair((Class) "NSResponder"_cls, "AppDelegate", 0);
     class_addProtocol(cls, objc_getProtocol("NSTouchBarProvider"));
     class_addMethod(cls, "applicationShouldTerminateAfterLastWindowClosed:"_sel,
-                    (IMP)(+[](id, SEL, id) -> BOOL { return 1; }), "c@:@");
+                    (IMP)(+[](id, SEL, id) -> BOOL { return 0; }), "c@:@");
     class_addMethod(cls, "userContentController:didReceiveScriptMessage:"_sel,
                     (IMP)(+[](id self, SEL, id, id msg) {
                       auto w =
@@ -654,6 +664,23 @@ public:
     } else {
       m_window = (id)window;
     }
+
+    // Main window delegate
+    auto wcls =
+        objc_allocateClassPair((Class) "NSResponder"_cls, "WindowDelegate", 0);
+    class_addMethod(wcls, "windowShouldClose:"_sel,
+                    (IMP)(+[](id, SEL, id) -> BOOL { 
+                      if(onCloseHandler)
+                        onCloseHandler();
+                      return 0;
+                     }), "c@:@");
+    objc_registerClassPair(wcls);
+
+    auto wdelegate = ((id(*)(id, SEL))objc_msgSend)((id)wcls, "new"_sel);
+    objc_setAssociatedObject(delegate, "webview", (id)this,
+                             OBJC_ASSOCIATION_ASSIGN);
+    ((void (*)(id, SEL, id))objc_msgSend)(m_window, sel_registerName("setDelegate:"),
+                                          wdelegate);
 
     // Webview
     auto config =
@@ -1118,7 +1145,8 @@ public:
               w->m_browser->resize(hwnd);
               break;
             case WM_CLOSE:
-              DestroyWindow(hwnd);
+              if(onCloseHandler)
+                onCloseHandler();
               break;
             case WM_DESTROY:
               w->terminate();
@@ -1345,6 +1373,10 @@ public:
              seq + "] = undefined");
       }
     });
+  }
+  
+  void setOnCloseHandler(onCloseHandler_t handler) {
+    onCloseHandler = handler;
   }
 
 private:
