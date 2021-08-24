@@ -140,6 +140,7 @@ using dispatch_fn_t = std::function<void()>;
 using onCloseHandler_t = std::function<void()>;
 
 static onCloseHandler_t onCloseHandler;
+static int processExitCode = 0;
 
 // Convert ASCII hex digit to a nibble (four bits, 0 - 15).
 //
@@ -456,8 +457,7 @@ public:
     }
     g_signal_connect(G_OBJECT(m_window), "destroy",
                      G_CALLBACK(+[](GtkWidget *, gpointer arg) {
-                       static_cast<gtk_webkit_engine *>(arg)->terminate();
-                       std::exit(0);
+                       std::exit(processExitCode);
                      }),
                      this);
     g_signal_connect(G_OBJECT(m_window), "delete-event",
@@ -516,7 +516,11 @@ public:
   }
   void *window() { return (void *)m_window; }
   void run() { gtk_main(); }
-  void terminate() { gtk_main_quit(); }
+  void terminate(int exitCode = 0) {
+    processExitCode = exitCode;
+    gtk_window_close(GTK_WINDOW(m_window)); 
+    gtk_widget_destroy(m_window);
+  }
   void dispatch(std::function<void()> f) {
     g_idle_add_full(G_PRIORITY_HIGH_IDLE, (GSourceFunc)([](void *f) -> int {
                       (*static_cast<dispatch_fn_t *>(f))();
@@ -550,10 +554,12 @@ public:
       gtk_window_set_geometry_hints(GTK_WINDOW(m_window), nullptr, &g, h);
     }
     gtk_window_set_resizable(GTK_WINDOW(m_window), resizable);
-    if(resizable)
-      gtk_window_resize(GTK_WINDOW(m_window), width, height);
-    else
-      gtk_widget_set_size_request(m_window, width, height);
+    if(width != -1 || height != -1) {
+      if(resizable)
+        gtk_window_resize(GTK_WINDOW(m_window), width, height);
+      else
+        gtk_widget_set_size_request(m_window, width, height);
+    }
   }
 
   void navigate(const std::string url) {
@@ -748,10 +754,11 @@ public:
   }
   ~cocoa_wkwebview_engine() { close(); }
   void *window() { return (void *)m_window; }
-  void terminate() {
+  void terminate(int exitCode = 0) {
     close();
     ((void (*)(id, SEL, id))objc_msgSend)("NSApp"_cls, "terminate:"_sel,
                                           nullptr);
+    std::exit(exitCode);
   }
   void run() {
     id app = ((id(*)(id, SEL))objc_msgSend)("NSApplication"_cls,
@@ -794,10 +801,12 @@ public:
       ((void (*)(id, SEL, CGSize))objc_msgSend)(
           m_window, "setContentMaxSize:"_sel, CGSizeMake(maxWidth, maxHeight));
     }
-    ((void (*)(id, SEL, CGRect, BOOL, BOOL))objc_msgSend)(
-        m_window, "setFrame:display:animate:"_sel,
-        CGRectMake(0, 0, width, height), 1, 0);
-    ((void (*)(id, SEL))objc_msgSend)(m_window, "center"_sel);
+    if(width != -1 || height != -1) {
+      ((void (*)(id, SEL, CGRect, BOOL, BOOL))objc_msgSend)(
+          m_window, "setFrame:display:animate:"_sel,
+          CGRectMake(0, 0, width, height), 1, 0);
+      ((void (*)(id, SEL))objc_msgSend)(m_window, "center"_sel);
+    }
   }
   void navigate(const std::string url) {
     auto nsurl = ((id(*)(id, SEL, id))objc_msgSend)(
@@ -1001,6 +1010,7 @@ public:
                                    }
                                    else {
                                       m_settings->put_AreDevToolsEnabled(FALSE);
+                                      m_settings->put_IsStatusBarEnabled(FALSE);
                                    }
                                    flag.clear();
                                  }));
@@ -1149,7 +1159,10 @@ public:
                 onCloseHandler();
               break;
             case WM_DESTROY:
-              w->terminate();
+              PostQuitMessage(processExitCode);
+              break;
+            case WM_QUIT:
+              ExitProcess(wp);
               break;
             // ---- Begin Tray lib related --------
             case WM_TRAY_PASS_MENU_REF:
@@ -1239,13 +1252,18 @@ public:
         (*f)();
         delete f;
       } else if (msg.message == WM_QUIT) {
-        std::exit(0);
+        ExitProcess(msg.wParam);
         return;
       }
     }
   }
   void *window() { return (void *)m_window; }
-  void terminate() { PostQuitMessage(0); }
+  void terminate(int exitCode = 0) { 
+    processExitCode = exitCode;
+    dispatch([=]() {
+        DestroyWindow(m_window);
+    });
+  }
   void dispatch(dispatch_fn_t f) {
     PostThreadMessage(m_main_thread, WM_APP, 0, (LPARAM) new dispatch_fn_t(f));
   }
@@ -1272,15 +1290,17 @@ public:
       m_minsz.x = minWidth;
       m_minsz.y = minHeight;
     }
-    RECT r;
-    r.left = r.top = 0;
-    r.right = width;
-    r.bottom = height;
-    AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, 0);
-    SetWindowPos(
-        m_window, NULL, r.left, r.top, r.right - r.left, r.bottom - r.top,
-        SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE | SWP_FRAMECHANGED);
-    m_browser->resize(m_window);
+    if(width != -1 || height != -1) {
+      RECT r;
+      r.left = r.top = 0;
+      r.right = width;
+      r.bottom = height;
+      AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, 0);
+      SetWindowPos(
+          m_window, NULL, r.left, r.top, r.right - r.left, r.bottom - r.top,
+          SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE | SWP_FRAMECHANGED);
+      m_browser->resize(m_window);
+    }
   }
 
   void navigate(const std::string url) { m_browser->navigate(url); }
