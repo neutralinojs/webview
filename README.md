@@ -10,5 +10,5 @@ A modified version of [webview](https://github.com/webview/webview) for Neutrali
 - Automatically start dev tools on Windows (Edge Chromium) if `debug == true`.
 - Disable dev tools and inspect element context menu item on Windows if `debug == false`.
 - Extend `set_size()` method to accept `minWidth`, `minHeight`, `maxWidth`, `maxHeight`, and `resizable`.
-- Integrate [zserge/tray](https://github.com/zserge/tray)
+- Integrate [neutralinojs/tray](https://github.com/neutralinojs/tray)
 
