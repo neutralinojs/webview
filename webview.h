@@ -505,8 +505,7 @@ public:
         webkit_web_view_get_settings(WEBKIT_WEB_VIEW(m_webview));
     webkit_settings_set_javascript_can_access_clipboard(settings, true);
     if (debug) {
-      webkit_settings_set_enable_write_console_messages_to_stdout(settings,
-                                                                  true);
+      webkit_settings_set_enable_write_console_messages_to_stdout(settings, true);
       webkit_settings_set_enable_developer_extras(settings, true);
       WebKitWebInspector *inspector = webkit_web_view_get_inspector(WEBKIT_WEB_VIEW(m_webview));
       webkit_web_inspector_show(WEBKIT_WEB_INSPECTOR(inspector));
@@ -581,15 +580,13 @@ public:
   }
 
   void show_inspector() {
-    webkit_web_inspector_show(WEBKIT_WEB_INSPECTOR(
-      webkit_web_view_get_inspector(WEBKIT_WEB_VIEW(m_webview))
-    ));
+    WebKitWebInspector *inspector = webkit_web_view_get_inspector(WEBKIT_WEB_VIEW(m_webview));
+    webkit_web_inspector_show(WEBKIT_WEB_INSPECTOR(inspector));
   }
 
-  void hide_inspector() {
-    webkit_web_inspector_close(WEBKIT_WEB_INSPECTOR(
-      webkit_web_view_get_inspector(WEBKIT_WEB_VIEW(m_webview))
-    ));
+  void close_inspector() {
+    WebKitWebInspector *inspector = webkit_web_view_get_inspector(WEBKIT_WEB_VIEW(m_webview));
+    webkit_web_inspector_close(WEBKIT_WEB_INSPECTOR(inspector));
   }
 
 private:
