@@ -71,6 +71,12 @@ WEBVIEW_API void webview_set_title(webview_t w, const char *title);
 #define WEBVIEW_HINT_MIN 1   // Width and height are minimum bounds
 #define WEBVIEW_HINT_MAX 2   // Width and height are maximum bounds
 #define WEBVIEW_HINT_FIXED 3 // Window size can not be changed by a user
+// Window events
+#define WEBVIEW_WINDOW_CLOSE 0
+#define WEBVIEW_WINDOW_FOCUS 1
+#define WEBVIEW_WINDOW_BLUR 2
+#define WEBVIEW_WINDOW_FULLSCREEN 3 // GTK only
+#define WEBVIEW_WINDOW_UNDEFINED 100 // GTK only
 // Updates native window size. See WEBVIEW_HINT constants.
 WEBVIEW_API void webview_set_size(webview_t w, int width, int height,
                                   int hints);
@@ -137,9 +143,9 @@ WEBVIEW_API void webview_return(webview_t w, const char *seq, int status,
 
 namespace webview {
 using dispatch_fn_t = std::function<void()>;
-using onCloseHandler_t = std::function<void()>;
+using eventHandler_t = std::function<void(int)>;
 
-static onCloseHandler_t onCloseHandler;
+static eventHandler_t windowStateChange;
 static int processExitCode = 0;
 
 // Convert ASCII hex digit to a nibble (four bits, 0 - 15).
@@ -440,6 +446,7 @@ inline std::string json_parse(const std::string s, const std::string key,
 //
 // ====================================================================
 //
+#include <X11/Xlib.h>
 #include <JavaScriptCore/JavaScript.h>
 #include <gtk/gtk.h>
 #include <webkit2/webkit2.h>
@@ -450,6 +457,8 @@ class gtk_webkit_engine {
 public:
   gtk_webkit_engine(bool debug, void *window)
       : m_window(static_cast<GtkWidget *>(window)) {
+
+    XInitThreads();
     gtk_init_check(0, NULL);
     m_window = static_cast<GtkWidget *>(window);
     if (m_window == nullptr) {
@@ -460,13 +469,32 @@ public:
                        std::exit(processExitCode);
                      }),
                      this);
+
     g_signal_connect(G_OBJECT(m_window), "delete-event",
-                     G_CALLBACK(+[](GtkWidget *, gpointer arg) {
-                       if(onCloseHandler)
-                         onCloseHandler();
-                       return true;
-                     }),
-                     nullptr);
+                    G_CALLBACK(+[](GtkWidget *, gpointer arg) {
+                        if(windowStateChange)
+                            windowStateChange(WEBVIEW_WINDOW_CLOSE);
+                        return true;
+                    }),
+                    nullptr);
+
+    g_signal_connect(G_OBJECT(m_window), "window-state-event",
+        G_CALLBACK(+[](GtkWidget *widget, GdkEventWindowState *event, gpointer user_data) {
+            if(!windowStateChange) return;
+
+            if(event->changed_mask & GDK_WINDOW_STATE_FULLSCREEN)
+                windowStateChange(WEBVIEW_WINDOW_FULLSCREEN);
+            else if(event->changed_mask & GDK_WINDOW_STATE_FOCUSED) {
+                if(event->new_window_state & GDK_WINDOW_STATE_FOCUSED)
+                  windowStateChange(WEBVIEW_WINDOW_FOCUS);
+                else
+                  windowStateChange(WEBVIEW_WINDOW_BLUR);
+            }
+            else
+                windowStateChange(WEBVIEW_WINDOW_UNDEFINED);
+        }),
+    nullptr);
+
     // Initialize webview widget
     m_webview = webkit_web_view_new();
     WebKitUserContentManager *manager =
@@ -518,7 +546,7 @@ public:
   void run() { gtk_main(); }
   void terminate(int exitCode = 0) {
     processExitCode = exitCode;
-    gtk_window_close(GTK_WINDOW(m_window)); 
+    gtk_window_close(GTK_WINDOW(m_window));
     gtk_widget_destroy(m_window);
   }
   void dispatch(std::function<void()> f) {
@@ -534,7 +562,12 @@ public:
     gtk_window_set_title(GTK_WINDOW(m_window), title.c_str());
   }
 
-  void set_size(int width, int height, int minWidth, int minHeight, 
+  std::string get_title() {
+    std::string title(gtk_window_get_title(GTK_WINDOW(m_window)));
+    return title;
+  }
+
+  void set_size(int width, int height, int minWidth, int minHeight,
   int maxWidth, int maxHeight, bool resizable) {
     if(minWidth != -1 || minHeight != -1 || maxWidth != -1 || maxHeight != -1) {
       GdkGeometry g;
@@ -544,9 +577,9 @@ public:
         h = (GdkWindowHints)(GDK_HINT_MIN_SIZE | GDK_HINT_MAX_SIZE);
       else if(maxWidth != -1 || maxHeight != -1)
         h = GDK_HINT_MAX_SIZE;
-      else 
+      else
         h = GDK_HINT_MIN_SIZE;
-        
+
       g.min_width = minWidth;
       g.min_height = minHeight;
       g.max_width = maxWidth;
@@ -675,11 +708,22 @@ public:
     auto wcls =
         objc_allocateClassPair((Class) "NSResponder"_cls, "WindowDelegate", 0);
     class_addMethod(wcls, "windowShouldClose:"_sel,
-                    (IMP)(+[](id, SEL, id) -> BOOL { 
-                      if(onCloseHandler)
-                        onCloseHandler();
+                    (IMP)(+[](id, SEL, id) -> BOOL {
+                      if(windowStateChange)
+                        windowStateChange(WEBVIEW_WINDOW_CLOSE);
                       return 0;
                      }), "c@:@");
+    class_addMethod(wcls, "windowDidBecomeKey:"_sel,
+                    (IMP)(+[](id, SEL, id) { 
+                        if(windowStateChange)
+                          windowStateChange(WEBVIEW_WINDOW_FOCUS);
+                    }), "c@:@");
+    class_addMethod(wcls, "windowDidResignKey:"_sel,
+                    (IMP)(+[](id, SEL, id) { 
+                        if(windowStateChange)
+                          windowStateChange(WEBVIEW_WINDOW_BLUR);
+                    }), "c@:@");
+            
     objc_registerClassPair(wcls);
 
     auto wdelegate = ((id(*)(id, SEL))objc_msgSend)((id)wcls, "new"_sel);
@@ -777,13 +821,24 @@ public:
                        delete f;
                      }));
   }
+
   void set_title(const std::string title) {
     ((void (*)(id, SEL, id))objc_msgSend)(
         m_window, "setTitle:"_sel,
         ((id(*)(id, SEL, const char *))objc_msgSend)(
             "NSString"_cls, "stringWithUTF8String:"_sel, title.c_str()));
   }
-  void set_size(int width, int height, int minWidth, int minHeight, 
+
+  std::string get_title() {
+    std::string title = std::string(
+      ((const char *(*)(id, SEL))objc_msgSend)(
+        ((id(*)(id, SEL))objc_msgSend)(m_window, "title"_sel)
+      , "UTF8String"_sel)
+    );
+    return title;
+  }
+
+  void set_size(int width, int height, int minWidth, int minHeight,
                 int maxWidth, int maxHeight, bool resizable) {
     auto style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                  NSWindowStyleMaskMiniaturizable;
@@ -1005,7 +1060,7 @@ public:
                                    ICoreWebView2Settings *m_settings;
                                    m_webview->get_Settings(&m_settings);
                                    if(debug) {
-                                      m_settings->put_AreDevToolsEnabled(TRUE); 
+                                      m_settings->put_AreDevToolsEnabled(TRUE);
                                       m_webview->OpenDevToolsWindow();
                                    }
                                    else {
@@ -1155,8 +1210,15 @@ public:
               w->m_browser->resize(hwnd);
               break;
             case WM_CLOSE:
-              if(onCloseHandler)
-                onCloseHandler();
+              if(windowStateChange)
+                windowStateChange(WEBVIEW_WINDOW_CLOSE);
+              break;
+            case WM_ACTIVATE:
+              if(!windowStateChange) break;
+              if(LOWORD(wp) == WA_INACTIVE)
+                windowStateChange(WEBVIEW_WINDOW_BLUR);
+              else
+                windowStateChange(WEBVIEW_WINDOW_FOCUS);
               break;
             case WM_DESTROY:
               PostQuitMessage(processExitCode);
@@ -1168,7 +1230,7 @@ public:
             case WM_TRAY_PASS_MENU_REF:
               menuRef = (HMENU) wp;
               break;
-            case WM_TRAY_CALLBACK_MESSAGE: 
+            case WM_TRAY_CALLBACK_MESSAGE:
               if (lp == WM_LBUTTONUP || lp == WM_RBUTTONUP) {
                 POINT p;
                 GetCursorPos(&p);
@@ -1177,7 +1239,7 @@ public:
                                                     TPM_RETURNCMD | TPM_NONOTIFY,
                                           p.x, p.y, 0, hwnd, nullptr);
                 SendMessage(hwnd, WM_COMMAND, cmd, 0);
-              } 
+              }
               break;
             case WM_COMMAND:
               if (wp >= ID_TRAY_FIRST) {
@@ -1222,7 +1284,7 @@ public:
       m_window = *(static_cast<HWND *>(window));
     }
 
-    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
+    setDpi();
     ShowWindow(m_window, SW_SHOW);
     UpdateWindow(m_window);
     SetFocus(m_window);
@@ -1258,7 +1320,7 @@ public:
     }
   }
   void *window() { return (void *)m_window; }
-  void terminate(int exitCode = 0) { 
+  void terminate(int exitCode = 0) {
     processExitCode = exitCode;
     dispatch([=]() {
         DestroyWindow(m_window);
@@ -1272,7 +1334,15 @@ public:
     SetWindowText(m_window, title.c_str());
   }
 
-  void set_size(int width, int height, int minWidth, int minHeight, 
+  std::string get_title() {
+    int len = GetWindowTextLength(hwnd);
+    std::string title;
+    title.reserve(len + 1);
+    GetWindowText(hwnd, const_cast<char*>(title.c_str()), len);
+    return title;
+  }
+
+  void set_size(int width, int height, int minWidth, int minHeight,
                 int maxWidth, int maxHeight, bool resizable) {
     auto style = GetWindowLong(m_window, GWL_STYLE);
     if (!resizable) {
@@ -1285,7 +1355,7 @@ public:
     if (maxWidth != -1 || maxHeight != -1) {
       m_maxsz.x = maxWidth;
       m_maxsz.y = maxHeight;
-    } 
+    }
     if (minWidth != -1 || minHeight != -1) {
       m_minsz.x = minWidth;
       m_minsz.y = minHeight;
@@ -1295,7 +1365,6 @@ public:
       r.left = r.top = 0;
       r.right = width;
       r.bottom = height;
-      AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, 0);
       SetWindowPos(
           m_window, NULL, r.left, r.top, r.right - r.left, r.bottom - r.top,
           SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE | SWP_FRAMECHANGED);
@@ -1309,6 +1378,16 @@ public:
 
 private:
   virtual void on_message(const std::string msg) = 0;
+
+  void setDpi() {
+    HMODULE user32 = LoadLibraryA("User32.dll");
+    auto func_win10 = reinterpret_cast<decltype(&SetProcessDpiAwarenessContext)>(
+      GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
+    if (func_win10) {
+        // Windows 10+
+        func_win10(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
+    }
+  }
 
   HWND m_window;
   POINT m_minsz = POINT{0, 0};
@@ -1394,9 +1473,9 @@ public:
       }
     });
   }
-  
-  void setOnCloseHandler(onCloseHandler_t handler) {
-    onCloseHandler = handler;
+
+  void setEventHandler(eventHandler_t handler) {
+    windowStateChange = handler;
   }
 
 private:
