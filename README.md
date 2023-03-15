@@ -11,4 +11,5 @@ A modified version of [webview](https://github.com/webview/webview) for Neutrali
 - Disable dev tools and inspect element context menu item on Windows if `debug == false`.
 - Extend `set_size()` method to accept `minWidth`, `minHeight`, `maxWidth`, `maxHeight`, and `resizable`.
 - Integrate [neutralinojs/tray](https://github.com/neutralinojs/tray)
+- Apply dark/light themese from system preferences on Windows.
 
