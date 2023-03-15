@@ -942,6 +942,8 @@ using browser_engine = cocoa_wkwebview_engine;
 #define TRAY_WINAPI 1
 #include "lib/tray/tray.h"
 
+#include "darkmode.h"
+
 namespace webview {
 
 using msg_cb_t = std::function<void(const std::string)>;
@@ -1276,7 +1278,7 @@ public:
             return 0;
           });
       RegisterClassEx(&wc);
-      m_window = CreateWindow("Neutralinojs_webview", "", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
+      m_window = CreateWindow("Neutralinojs_webview", "", WS_OVERLAPPEDWINDOW, 99999999,
                               CW_USEDEFAULT, 640, 480, nullptr, nullptr,
                               GetModuleHandle(nullptr), nullptr);
       SetWindowLongPtr(m_window, GWLP_USERDATA, (LONG_PTR)this);
@@ -1287,7 +1289,18 @@ public:
     setDpi();
     ShowWindow(m_window, SW_SHOW);
     UpdateWindow(m_window);
+
+    // store the original initial window style
+    m_originalStyleEx = GetWindowLong(m_window, GWL_EXSTYLE);
+
+    // stop the taskbar icon from showing by changing windowstyle to toolwindow.
+    ShowWindow(m_window, SW_HIDE);
+    SetWindowLong(m_window, GWL_EXSTYLE, WS_EX_TOOLWINDOW);
+    ShowWindow(m_window, SW_SHOW);
     SetFocus(m_window);
+
+    // set dark mode of title bar according to system theme
+    TrySetWindowTheme(m_window);
 
     auto cb =
         std::bind(&win32_edge_engine::on_message, this, std::placeholders::_1);
@@ -1375,6 +1388,10 @@ public:
   void navigate(const std::string url) { m_browser->navigate(url); }
   void eval(const std::string js) { m_browser->eval(js); }
   void init(const std::string js) { m_browser->init(js); }
+
+  #if defined(_WIN32)
+  DWORD m_originalStyleEx;
+  #endif
 
 private:
   virtual void on_message(const std::string msg) = 0;
