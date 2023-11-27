@@ -562,6 +562,13 @@ public:
     gtk_window_set_title(GTK_WINDOW(m_window), title.c_str());
   }
 
+  void extend_user_agent(const std::string customAgent) {
+    WebKitSettings *settings =
+      webkit_web_view_get_settings(WEBKIT_WEB_VIEW(m_webview));
+      std::string ua = std::string(webkit_settings_get_user_agent(settings)) + " " + customAgent;
+      webkit_settings_set_user_agent(settings, ua.c_str());
+  }
+
   std::string get_title() {
     std::string title(gtk_window_get_title(GTK_WINDOW(m_window)));
     return title;
@@ -714,16 +721,16 @@ public:
                       return 0;
                      }), "c@:@");
     class_addMethod(wcls, "windowDidBecomeKey:"_sel,
-                    (IMP)(+[](id, SEL, id) { 
+                    (IMP)(+[](id, SEL, id) {
                         if(windowStateChange)
                           windowStateChange(WEBVIEW_WINDOW_FOCUS);
                     }), "c@:@");
     class_addMethod(wcls, "windowDidResignKey:"_sel,
-                    (IMP)(+[](id, SEL, id) { 
+                    (IMP)(+[](id, SEL, id) {
                         if(windowStateChange)
                           windowStateChange(WEBVIEW_WINDOW_BLUR);
                     }), "c@:@");
-            
+
     objc_registerClassPair(wcls);
 
     auto wdelegate = ((id(*)(id, SEL))objc_msgSend)((id)wcls, "new"_sel);
@@ -820,6 +827,21 @@ public:
                        (*f)();
                        delete f;
                      }));
+  }
+
+  void extend_user_agent(const std::string customAgent) {
+    std::string ua = std::string(
+      ((const char *(*)(id, SEL))objc_msgSend)(
+        ((id(*)(id, SEL, id))objc_msgSend)(m_webview, "valueForKey:"_sel, 
+        "userAgent"_str), "UTF8String"_sel)
+    );
+    std::string newUa = ua + " " + customAgent;
+    ((id(*)(id, SEL, id, id))objc_msgSend)(
+        m_webview,
+        "setValue:forKey:"_sel,
+        ((id(*)(id, SEL, const char *))objc_msgSend)(
+            "NSString"_cls, "stringWithUTF8String:"_sel, newUa.c_str()),
+        "customUserAgent"_str);
   }
 
   void set_title(const std::string title) {
@@ -954,6 +976,7 @@ public:
   virtual ~browser() = default;
   virtual bool embed(HWND, bool, msg_cb_t) = 0;
   virtual void navigate(const std::string url) = 0;
+  virtual void extend_user_agent(const std::string customAgent) = 0;
   virtual void eval(const std::string js) = 0;
   virtual void init(const std::string js) = 0;
   virtual void resize(HWND) = 0;
@@ -1008,6 +1031,8 @@ public:
     }
   }
 
+  void extend_user_agent(const std::string customAgent) {}
+
   void init(const std::string js) override {
     init_js = init_js + "(function(){" + js + "})();";
   }
@@ -1038,7 +1063,7 @@ private:
 class edge_chromium : public browser {
 public:
   bool embed(HWND wnd, bool debug, msg_cb_t cb) override {
-    CoInitializeEx(nullptr, 0);
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     std::atomic_flag flag = ATOMIC_FLAG_INIT;
     flag.test_and_set();
 
@@ -1052,25 +1077,27 @@ public:
     std::wstring currentExeNameW = wideCharConverter.from_bytes(currentExeName);
 
     HRESULT res = CreateCoreWebView2EnvironmentWithOptions(
-        nullptr, (userDataFolder + L"/" + currentExeNameW).c_str(), nullptr,
-        new webview2_com_handler(wnd, cb,
-                                 [&](ICoreWebView2Controller *controller) {
-                                   m_controller = controller;
-                                   m_controller->get_CoreWebView2(&m_webview);
-                                   m_webview->AddRef();
+        nullptr,
+        (userDataFolder + L"/" + currentExeNameW).c_str(),
+        nullptr,
+        new webview2_com_handler(wnd, cb, [&](ICoreWebView2Controller* controller) {
+            m_controller = controller;
+            m_controller->get_CoreWebView2(&m_webview);
+            m_webview->AddRef();
 
-                                   ICoreWebView2Settings *m_settings;
-                                   m_webview->get_Settings(&m_settings);
-                                   if(debug) {
-                                      m_settings->put_AreDevToolsEnabled(TRUE);
-                                      m_webview->OpenDevToolsWindow();
-                                   }
-                                   else {
-                                      m_settings->put_AreDevToolsEnabled(FALSE);
-                                      m_settings->put_IsStatusBarEnabled(FALSE);
-                                   }
-                                   flag.clear();
-                                 }));
+            ICoreWebView2Settings* m_settings;
+            m_webview->get_Settings(&m_settings);
+            if (debug) {
+                m_settings->put_AreDevToolsEnabled(TRUE);
+                m_webview->OpenDevToolsWindow();
+            }
+            else {
+                m_settings->put_AreDevToolsEnabled(FALSE);
+                m_settings->put_IsStatusBarEnabled(FALSE);
+            }
+            flag.clear();
+        }
+    ));
     if (res != S_OK) {
       CoUninitialize();
       return false;
@@ -1082,6 +1109,20 @@ public:
     }
     init("window.external={invoke:s=>window.chrome.webview.postMessage(s)}");
     return true;
+  }
+
+  void extend_user_agent(const std::string customAgent) override {
+    ICoreWebView2Settings *settings = nullptr;
+    m_webview->get_Settings(&settings);
+    ICoreWebView2Settings2 *settings2 = nullptr;
+    settings->QueryInterface(IID_ICoreWebView2Settings2, reinterpret_cast<void**>(&settings2));
+    LPWSTR ua; 
+    settings2->get_UserAgent(&ua);
+    std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> wideCharConverter;
+    std::string newUa = wideCharConverter.to_bytes(ua) + " " + customAgent;
+    settings2->put_UserAgent(to_lpwstr(newUa));
+    settings2->Release();
+    CoTaskMemFree(ua);
   }
 
   void resize(HWND wnd) override {
@@ -1200,7 +1241,7 @@ public:
       ZeroMemory(&wc, sizeof(WNDCLASSEX));
       wc.cbSize = sizeof(WNDCLASSEX);
       wc.hInstance = hInstance;
-      wc.lpszClassName = "Neutralinojs_webview";
+      wc.lpszClassName = L"Neutralinojs_webview";
       wc.hIcon = icon;
       wc.hIconSm = icon;
       wc.lpfnWndProc =
@@ -1278,7 +1319,7 @@ public:
             return 0;
           });
       RegisterClassEx(&wc);
-      m_window = CreateWindow("Neutralinojs_webview", "", WS_OVERLAPPEDWINDOW, 99999999,
+      m_window = CreateWindow(L"Neutralinojs_webview", L"", WS_OVERLAPPEDWINDOW, 99999999,
                               CW_USEDEFAULT, 640, 480, nullptr, nullptr,
                               GetModuleHandle(nullptr), nullptr);
       SetWindowLongPtr(m_window, GWLP_USERDATA, (LONG_PTR)this);
@@ -1287,17 +1328,15 @@ public:
     }
 
     setDpi();
+
+    // stop the taskbar icon from showing by removing WS_EX_APPWINDOW.
+    SetWindowLong(m_window, GWL_EXSTYLE, GetWindowLong(m_window, GWL_EXSTYLE) & ~WS_EX_APPWINDOW);
     ShowWindow(m_window, SW_SHOW);
     UpdateWindow(m_window);
+    SetForegroundWindow(m_window);
 
     // store the original initial window style
     m_originalStyleEx = GetWindowLong(m_window, GWL_EXSTYLE);
-
-    // stop the taskbar icon from showing by changing windowstyle to toolwindow.
-    ShowWindow(m_window, SW_HIDE);
-    SetWindowLong(m_window, GWL_EXSTYLE, WS_EX_TOOLWINDOW);
-    ShowWindow(m_window, SW_SHOW);
-    SetFocus(m_window);
 
     // set dark mode of title bar according to system theme
     TrySetWindowTheme(m_window);
@@ -1334,25 +1373,40 @@ public:
   }
   void *window() { return (void *)m_window; }
   void terminate(int exitCode = 0) {
+
+    // event to wait for window close completion
+    auto evtWindowClosed = CreateEvent(
+        NULL,               // default security attributes
+        TRUE,               // manual-reset event
+        FALSE,              // initial state is nonsignaled
+        TEXT("WindowClosedEvent")  // object name
+    );
     processExitCode = exitCode;
+
     dispatch([=]() {
         DestroyWindow(m_window);
+        SetEvent(evtWindowClosed);
     });
+
+    // wait for dispatch() to complete
+    WaitForSingleObject(evtWindowClosed, 10000);
+    CloseHandle(evtWindowClosed);
+
   }
   void dispatch(dispatch_fn_t f) {
     PostThreadMessage(m_main_thread, WM_APP, 0, (LPARAM) new dispatch_fn_t(f));
   }
 
   void set_title(const std::string title) {
-    SetWindowText(m_window, title.c_str());
+    SetWindowText(m_window, str2wstr(title).c_str());
   }
 
   std::string get_title() {
     int len = GetWindowTextLength(hwnd);
-    std::string title;
+    std::wstring title;
     title.reserve(len + 1);
-    GetWindowText(hwnd, const_cast<char*>(title.c_str()), len);
-    return title;
+    GetWindowText(hwnd, const_cast<WCHAR *>(title.c_str()), title.capacity());
+    return wstr2str(title);
   }
 
   void set_size(int width, int height, int minWidth, int minHeight,
@@ -1386,12 +1440,11 @@ public:
   }
 
   void navigate(const std::string url) { m_browser->navigate(url); }
+  void extend_user_agent(const std::string customAgent) { m_browser->extend_user_agent(customAgent); }
   void eval(const std::string js) { m_browser->eval(js); }
   void init(const std::string js) { m_browser->init(js); }
 
-  #if defined(_WIN32)
   DWORD m_originalStyleEx;
-  #endif
 
 private:
   virtual void on_message(const std::string msg) = 0;
@@ -1412,6 +1465,21 @@ private:
   DWORD m_main_thread = GetCurrentThreadId();
   std::unique_ptr<webview::browser> m_browser =
       std::make_unique<webview::edge_chromium>();
+
+  static std::wstring str2wstr(std::string const &str) {
+    int len = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), (int)str.size(), nullptr, 0);
+    std::wstring ret(len, '\0');
+    MultiByteToWideChar(CP_UTF8, 0, str.c_str(), (int)str.size(), (LPWSTR)ret.data(), (int)ret.size());
+    return ret;
+  }
+
+  std::string wstr2str(std::wstring const &str)
+  {
+    int len = WideCharToMultiByte(CP_UTF8, 0, str.c_str(), (int)str.size(), nullptr, 0, nullptr, nullptr);
+    std::string ret(len, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, str.c_str(), (int)str.size(), (LPSTR)ret.data(), (int)ret.size(), nullptr, nullptr);
+    return ret;
+  }
 };
 
 using browser_engine = win32_edge_engine;
